@@ -162,7 +162,7 @@ The database enforces uniqueness on `transactions.transaction_id`. PostgreSQL's 
 
 ### Background processing
 
-The worker polls PostgreSQL for pending jobs, claims jobs using row-level locking, and performs the simulated external operation outside the database transaction. It then persists the final transaction and job statuses.
+The worker polls PostgreSQL for pending jobs, claims jobs using row-level locking (`FOR UPDATE SKIP LOCKED`), and executes jobs concurrently using an in-process `ThreadPoolExecutor`. The concurrency limit is configurable via `WORKER_CONCURRENCY` (default: 50). Each thread performs the simulated external operation outside the database transaction, then safely updates the transaction and job statuses in a dedicated database session.
 
 ### Recovery and retries
 
@@ -203,8 +203,8 @@ sudo docker compose build api
 # Apply database migrations
 sudo docker compose run --rm api alembic upgrade head
 
-# Start the API and background worker
-sudo docker compose up -d api worker
+# Start the application (starts PostgreSQL, runs migrations, and launches API + worker)
+sudo docker compose up -d
 ```
 
 Check the service status:
@@ -226,7 +226,7 @@ http://localhost:8000/docs
 View application and worker logs:
 
 ```bash
-sudo docker compose logs -f api worker
+sudo docker compose logs -f api
 ```
 
 ## Run Tests
@@ -315,9 +315,7 @@ The following have been verified on the public API:
 
 ### Background Worker
 
-The background worker must run as a separate service using the same Docker image and Supabase PostgreSQL database. It is responsible for processing pending jobs after the simulated 30-second delay, updating transaction statuses, and recovering eligible failed or stale jobs.
-
-The worker's cloud deployment and end-to-end processing should be verified before considering the full asynchronous workflow production-ready.
+The background worker starts automatically alongside the API inside the Docker container via `start.sh`. It connects to the Supabase PostgreSQL database specified in `DATABASE_URL`, runs database migrations, and processes pending jobs concurrently using an in-process thread pool (`WORKER_CONCURRENCY`). After the simulated 30-second delay, it transitions transaction statuses to `PROCESSED`.
 
 ### Deployment Configuration
 

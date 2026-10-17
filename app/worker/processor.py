@@ -1,25 +1,35 @@
 
+import concurrent.futures
 import logging
+import signal
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select, or_
 
+from app.core.config import settings
 from app.db.models import OutboxJob, Transaction
 from app.db.session import SessionLocal
 
 logger = logging.getLogger(__name__)
 
-MAX_ATTEMPTS = 3
-RECOVERY_TIMEOUT_SECONDS = 60
-POLL_INTERVAL_SECONDS = 1
+MAX_ATTEMPTS = settings.MAX_ATTEMPTS
+RECOVERY_TIMEOUT_SECONDS = settings.RECOVERY_TIMEOUT_SECONDS
+POLL_INTERVAL_SECONDS = settings.POLL_INTERVAL_SECONDS
+WORKER_CONCURRENCY = settings.WORKER_CONCURRENCY
+PROCESSING_DELAY_SECONDS = settings.PROCESSING_DELAY_SECONDS
+RECOVERY_INTERVAL_SECONDS = settings.RECOVERY_INTERVAL_SECONDS
 
 
-def recover_stale_jobs() -> int:
+def recover_stale_jobs(timeout_seconds: int | None = None) -> int:
     """Return abandoned PROCESSING jobs to PENDING or mark them FAILED."""
-    cutoff = datetime.now(timezone.utc) - timedelta(
-        seconds=RECOVERY_TIMEOUT_SECONDS
+    timeout = (
+        timeout_seconds
+        if timeout_seconds is not None
+        else settings.RECOVERY_TIMEOUT_SECONDS
     )
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=timeout)
     recovered_count = 0
 
     with SessionLocal() as db:
@@ -40,7 +50,7 @@ def recover_stale_jobs() -> int:
                 job.locked_at = None
                 job.last_error = "Recovered stale processing job"
 
-                if job.attempts >= MAX_ATTEMPTS:
+                if job.attempts >= settings.MAX_ATTEMPTS:
                     job.status = "FAILED"
                     transaction = db.execute(
                         select(Transaction).where(
@@ -84,10 +94,16 @@ def claim_one_job() -> int | None:
     return job_id
 
 
-def process_job(job_id: int) -> None:
-    """Simulate a 30-second external operation and persist its result."""
+def process_job(job_id: int, delay_seconds: float | None = None) -> None:
+    """Simulate an external operation and persist its result."""
+    delay = (
+        delay_seconds
+        if delay_seconds is not None
+        else settings.PROCESSING_DELAY_SECONDS
+    )
     try:
-        time.sleep(30)
+        if delay > 0:
+            time.sleep(delay)
 
         with SessionLocal() as db:
             with db.begin():
@@ -137,7 +153,7 @@ def process_job(job_id: int) -> None:
                     job.locked_at = None
                     job.last_error = str(exc)[:2000]
 
-                    if job.attempts >= MAX_ATTEMPTS:
+                    if job.attempts >= settings.MAX_ATTEMPTS:
                         job.status = "FAILED"
 
                         transaction = db.execute(
@@ -158,29 +174,116 @@ def process_job(job_id: int) -> None:
             )
 
 
-def run_worker() -> None:
-    """Continuously recover abandoned jobs and process pending work."""
-    logger.info("Transaction worker started")
+def run_worker(
+    max_workers: int | None = None,
+    poll_interval: float | None = None,
+    stop_event: threading.Event | None = None,
+) -> None:
+    """Continuously claim and process jobs concurrently using an in-process thread pool."""
+    concurrency = (
+        max_workers
+        if max_workers is not None
+        else settings.WORKER_CONCURRENCY
+    )
+    interval = (
+        poll_interval
+        if poll_interval is not None
+        else settings.POLL_INTERVAL_SECONDS
+    )
 
-    while True:
-        try:
-            recover_stale_jobs()
-            job_id = claim_one_job()
+    if stop_event is None:
+        stop_event = threading.Event()
+        if threading.current_thread() is threading.main_thread():
+            def _handle_shutdown(signum, _frame):
+                logger.info(
+                    "Shutdown signal received (%s). Stopping worker gracefully...",
+                    signum,
+                )
+                stop_event.set()
 
-            if job_id is None:
-                time.sleep(POLL_INTERVAL_SECONDS)
-                continue
+            signal.signal(signal.SIGINT, _handle_shutdown)
+            signal.signal(signal.SIGTERM, _handle_shutdown)
 
-            logger.info("Claimed job %s", job_id)
-            process_job(job_id)
+    logger.info(
+        "Transaction worker started with thread pool (concurrency=%d, poll_interval=%.1fs)",
+        concurrency,
+        interval,
+    )
 
-        except KeyboardInterrupt:
-            logger.info("Worker shutdown requested")
-            break
+    active_futures: set[concurrent.futures.Future] = set()
+    last_recovery_time = 0.0
 
-        except Exception:
-            logger.exception("Unexpected worker loop error")
-            time.sleep(2)
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=concurrency,
+        thread_name_prefix="job-worker",
+    ) as executor:
+        while not stop_event.is_set():
+            try:
+                # 1. Clean up completed futures
+                done_futures = {f for f in active_futures if f.done()}
+                active_futures.difference_update(done_futures)
+                for f in done_futures:
+                    exc = f.exception()
+                    if exc:
+                        logger.error(
+                            "Job worker thread raised an unexpected exception: %s",
+                            exc,
+                        )
+
+                # 2. Periodically recover stale jobs
+                now = time.monotonic()
+                if now - last_recovery_time >= settings.RECOVERY_INTERVAL_SECONDS:
+                    try:
+                        recover_stale_jobs()
+                    except Exception:
+                        logger.exception("Error during stale job recovery")
+                    last_recovery_time = now
+
+                # 3. Claim and dispatch jobs as long as worker capacity is available
+                while len(active_futures) < concurrency and not stop_event.is_set():
+                    try:
+                        job_id = claim_one_job()
+                    except Exception:
+                        logger.exception("Error claiming job from database")
+                        break
+
+                    if job_id is None:
+                        break
+
+                    logger.info(
+                        "Claimed job %s (active tasks: %d/%d)",
+                        job_id,
+                        len(active_futures) + 1,
+                        concurrency,
+                    )
+                    future = executor.submit(process_job, job_id)
+                    active_futures.add(future)
+
+                # 4. Wait for running jobs or poll interval before claiming more
+                if active_futures:
+                    concurrent.futures.wait(
+                        active_futures,
+                        timeout=interval,
+                        return_when=concurrent.futures.FIRST_COMPLETED,
+                    )
+                else:
+                    stop_event.wait(timeout=interval)
+
+            except KeyboardInterrupt:
+                logger.info("Worker keyboard interrupt received")
+                stop_event.set()
+                break
+
+            except Exception:
+                logger.exception("Unexpected error in worker loop")
+                stop_event.wait(timeout=2.0)
+
+        logger.info(
+            "Worker shutdown initiated. Waiting for %d in-flight job(s) to finish...",
+            len(active_futures),
+        )
+
+    logger.info("Worker shutdown complete. All jobs finished.")
 
 
 if __name__ == "__main__":

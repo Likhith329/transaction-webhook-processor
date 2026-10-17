@@ -28,24 +28,12 @@ services:
       - .env
     environment:
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+      WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-50}
     ports:
       - "8000:8000"
     depends_on:
       db:
         condition: service_healthy
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
-
-  worker:
-    image: transaction-webhook-processor:local
-    restart: unless-stopped
-    env_file:
-      - .env
-    environment:
-      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
-    depends_on:
-      db:
-        condition: service_healthy
-    command: python -m app.worker.processor
 
 volumes:
   postgres_data:
