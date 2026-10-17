@@ -9,7 +9,7 @@ A reliable transaction webhook processing service built with **FastAPI, PostgreS
 - **Interactive API Documentation:** https://transaction-webhook-processor-2.onrender.com/docs
 - **GitHub Repository:** https://github.com/Likhith329/transaction-webhook-processor
 
-The deployed API acknowledges incoming transaction webhooks immediately. The project also includes a PostgreSQL-backed background worker that simulates processing after a 30-second delay. **The API deployment and webhook/idempotency checks have been verified; the background worker still needs to be deployed and end-to-end processing verified in the cloud.**
+The deployed API acknowledges incoming transaction webhooks immediately and runs a PostgreSQL-backed background worker that processes transactions concurrently after a 30-second delay. Both the API and concurrent background worker are deployed and verified live in the cloud.
 
 ## Features
 
@@ -118,7 +118,7 @@ Possible transaction statuses:
 - `PROCESSED`
 - `FAILED`
 
-A transaction typically transitions to `PROCESSED` approximately 30 seconds after the worker starts processing it. The `processed_at` field remains null until processing completes. This end-to-end behavior must be verified after the background worker is deployed in the cloud.
+A transaction transitions to `PROCESSED` approximately 30 seconds after the worker starts processing it. The `processed_at` timestamp is populated when processing completes.
 
 ## Database Design
 
@@ -306,12 +306,14 @@ The API is deployed on Render using Docker and connects to a managed PostgreSQL 
 
 ### Deployment Verification
 
-The following have been verified on the public API:
+The following have been verified on the public deployment:
 
 - Docker image built and deployed successfully on Render.
 - Health endpoint verified with HTTP 200 OK.
 - Webhook endpoint verified with HTTP 202 Accepted.
 - Duplicate transaction handling verified using the `X-Idempotent-Replay` response header.
+- Background worker verified processing transactions concurrently after the 30-second delay.
+- Transaction status verified transitioning from `PROCESSING` to `PROCESSED` with populated `processed_at` timestamp.
 
 ### Background Worker
 
