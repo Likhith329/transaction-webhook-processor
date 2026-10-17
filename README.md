@@ -1,8 +1,15 @@
 # Transaction Webhook Processor
 
-A reliable, asynchronous transaction webhook processing service built with **FastAPI, PostgreSQL, SQLAlchemy, and Docker**.
+A reliable transaction webhook processing service built with **FastAPI, PostgreSQL, SQLAlchemy, and Docker**.
 
-The service acknowledges incoming transaction webhooks immediately and processes them in the background after a simulated 30-second delay. It uses PostgreSQL-backed job storage and idempotency controls to prevent duplicate transactions and improve reliability.
+## Live Demo
+
+- **API Base URL:** https://transaction-webhook-processor-1.onrender.com
+- **Health Check:** https://transaction-webhook-processor-1.onrender.com/
+- **Interactive API Documentation:** https://transaction-webhook-processor-1.onrender.com/docs
+- **GitHub Repository:** https://github.com/Likhith329/transaction-webhook-processor
+
+The deployed API acknowledges incoming transaction webhooks immediately. The project also includes a PostgreSQL-backed background worker that simulates processing after a 30-second delay. **The API deployment and webhook/idempotency checks have been verified; the background worker still needs to be deployed and end-to-end processing verified in the cloud.**
 
 ## Features
 
@@ -14,7 +21,7 @@ The service acknowledges incoming transaction webhooks immediately and processes
 - **Concurrent job claiming:** PostgreSQL row locking with `FOR UPDATE SKIP LOCKED` prevents workers from claiming the same pending job simultaneously.
 - **Failure recovery:** Failed jobs can be retried, and stale processing jobs can be recovered.
 - **Database migrations:** Alembic manages database schema changes.
-- **Containerized services:** Docker Compose runs PostgreSQL, the API, and the background worker.
+- **Containerized services:** Docker Compose runs PostgreSQL, the API, and the background worker locally.
 
 ## Tech Stack
 
@@ -73,7 +80,7 @@ Request body:
 Example request:
 
 ```bash
-curl -i -X POST http://localhost:8000/v1/webhooks/transactions \
+curl -i -X POST https://transaction-webhook-processor-1.onrender.com/v1/webhooks/transactions \
   -H "Content-Type: application/json" \
   -d '{
     "transaction_id": "txn_abc123def456",
@@ -100,7 +107,7 @@ The response includes an `X-Idempotent-Replay` header: `false` for a newly inser
 Example:
 
 ```bash
-curl http://localhost:8000/v1/transactions/txn_abc123def456
+curl https://transaction-webhook-processor-1.onrender.com/v1/transactions/txn_abc123def456
 ```
 
 The response contains the transaction details, current status, creation time, and processing completion time.
@@ -111,7 +118,7 @@ Possible transaction statuses:
 - `PROCESSED`
 - `FAILED`
 
-A transaction typically transitions to `PROCESSED` approximately 30 seconds after the worker starts processing it. The `processed_at` field remains null until processing completes.
+A transaction typically transitions to `PROCESSED` approximately 30 seconds after the worker starts processing it. The `processed_at` field remains null until processing completes. This end-to-end behavior must be verified after the background worker is deployed in the cloud.
 
 ## Database Design
 
@@ -214,7 +221,7 @@ curl http://localhost:8000/
 
 Interactive API documentation is available at:
 
-`http://localhost:8000/docs`
+http://localhost:8000/docs
 
 View application and worker logs:
 
@@ -280,14 +287,42 @@ transaction-webhook-processor/
 
 ## Deployment
 
-For cloud deployment, run the FastAPI application and worker as separate services and configure both to use the same managed PostgreSQL database.
+The API is deployed on Render using Docker and connects to a managed PostgreSQL database hosted on Supabase.
 
-The deployment must apply Alembic migrations before serving requests. Configure database credentials through the hosting platform's environment variables, expose the API over HTTPS, and verify the public health and webhook endpoints after deployment.
+### Public Deployment
 
-**Deployment status:** Local Docker validation is complete. Add the public repository URL and deployed API URL here after they are available.
+- **API Base URL:** https://transaction-webhook-processor-1.onrender.com
+- **Health Check:** https://transaction-webhook-processor-1.onrender.com/
+- **Interactive API Documentation:** https://transaction-webhook-processor-1.onrender.com/docs
+- **GitHub Repository:** https://github.com/Likhith329/transaction-webhook-processor
 
-## Limitations
+### Available Endpoints
 
-- The 30-second delay simulates an external operation; no actual payment is executed.
-- The worker polls PostgreSQL rather than using a separate message broker.
-- The implementation provides durable job storage and retry/recovery behavior, but exactly-once execution of an external side effect would require additional idempotency guarantees from that external system.
+| Method | Endpoint | Purpose |
+|---|---|---|
+| GET | `/` | Check service health |
+| POST | `/v1/webhooks/transactions` | Receive and acknowledge transaction webhooks |
+| GET | `/v1/transactions/{transaction_id}` | Retrieve transaction status |
+
+### Deployment Verification
+
+The following have been verified on the public API:
+
+- Docker image built and deployed successfully on Render.
+- Health endpoint verified with HTTP 200 OK.
+- Webhook endpoint verified with HTTP 202 Accepted.
+- Duplicate transaction handling verified using the `X-Idempotent-Replay` response header.
+
+### Background Worker
+
+The background worker must run as a separate service using the same Docker image and Supabase PostgreSQL database. It is responsible for processing pending jobs after the simulated 30-second delay, updating transaction statuses, and recovering eligible failed or stale jobs.
+
+The worker's cloud deployment and end-to-end processing should be verified before considering the full asynchronous workflow production-ready.
+
+### Deployment Configuration
+
+- **Application hosting:** Render
+- **Containerization:** Docker
+- **Database:** Supabase PostgreSQL
+- **Database migrations:** Alembic
+- **Configuration:** Set database credentials and other environment variables through the hosting platform. Never commit secrets to the repository.
